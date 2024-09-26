@@ -1,0 +1,35 @@
+Total Claims: 1
+**********************************
+Priority Metrics:
+**********************************
+Priority Medium: 0 (0.00%)
+Priority High: 1 (100.00%)
+Priority Low: 0 (0.00%)
+Priority Low: 0 (0.00%)
+**********************************
+Status Metrics:
+**********************************
+Status In Progress: 0 (0.00%)
+Status Resolved: 0 (0.00%)
+Status Rejected: 0 (0.00%)
+**********************************
+Category Metrics:
+**********************************
+Category customer service: 0 (0.00%)
+Category technical: 0 (0.00%)
+Category Unknown: 0 (0.00%)
+Category Unknown: 0 (0.00%)
+Category Unknown: 1 (100.00%)
+**********************************
+Average Processing Time by Priority:
+**********************************
+Priority Medium: -1.#J minutes
+Priority High: 0.00 minutes
+Priority Low: -1.#J minutes
+Priority Low: 1.#J minutes
+**********************************
+Average Processing Time by Status:
+**********************************
+Status In Progress: -1.#J minutes
+Status Resolved: -1.#J minutes
+Status Rejected: -1.#J minutes

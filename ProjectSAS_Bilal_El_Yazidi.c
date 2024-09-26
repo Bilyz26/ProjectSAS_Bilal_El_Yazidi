@@ -48,11 +48,11 @@ enum ClaimPriority {
 };
 
 enum ClaimCategory {
-	SHIPPING,
+	// SHIPPING,
 	PAYMENT,
 	CUSTOMER_SERVICES,
 	TECHNICAL,
-	RETURN
+	// RETURN
 };
 
 struct User {
@@ -65,6 +65,23 @@ struct User {
 	int is_locked;
 };
 
+void claimsIn24AndPending(struct ClaimArray* claimArray)
+{
+	for(int i=0;i<claimArray->count;i++)
+	{
+		long long diff = difftime(time(NULL) , claimArray->claims[i].submission_date);
+      if(diff<=3600&& claimArray->claims[i].status==PENDING)
+	  {
+		printf("%d\n,%d\n,%d\n,%d\n,%d\n,%d\n",
+		claimArray->claims[i].id,
+		claimArray->claims[i].description,
+		getCategoryString(claimArray->claims[i].category),
+		claimArray->claims[i].reason,
+		getStatusString(claimArray->claims[i].status),
+		getPriorityString(claimArray->claims[i].priority));
+	  }
+	}
+}
 struct Claim {
 	int id;
 	char username[MAX_USERNAME_LENGTH];
@@ -336,12 +353,12 @@ void initClaimArray(struct ClaimArray* claimArray) {
 
 void addUser(struct UserArray* userArray, struct User user) {
     // Check for duplicate usernames
-    // for (int i = 0; i < userArray->count; i++) {
-    //     if (strcmp(userArray->users[i].username, user.username) == 0) {
-    //         printf("Username already exists.\n");
-    //         return;
-    //     }  
-    // }
+    for (int i = 0; i < userArray->count; i++) {
+        if (strcmp(userArray->users[i].username, user.username) == 0) {
+            printf("Username already exists.\n");
+            return;
+        }  
+    }
 	if (userArray->count == userArray->capacity) {
 		userArray->capacity *= 2;
 		userArray->users = realloc(userArray->users, userArray->capacity * sizeof(struct User));
@@ -383,7 +400,6 @@ void saveUsersToFile(struct UserArray* userArray, const char* filename) {
 void loadUsersFromFile(struct UserArray* userArray, const char* filename) {
 	FILE* file = fopen(filename, "r");
 	if (file == NULL) {
-		printf("No existing user file found. Starting with an empty user list.\n");
 		return;
 	}
 	int count;
@@ -434,7 +450,6 @@ void saveClaimsToFile(struct ClaimArray* claimArray, const char* filename) {
 void loadClaimsFromFile(struct ClaimArray* claimArray, const char* filename) {
 	FILE* file = fopen(filename, "r");
 	if (file == NULL) {
-		printf("No existing claims file found. Starting with an empty claims list.\n");
 		return;
 	}
 	int count;
@@ -595,8 +610,7 @@ void submitClaim(struct ClaimArray* claimArray, const char* username) {
 	newClaim.reason[strcspn(newClaim.reason, "\n")] = 0;
 	
 	printAsterics(30);
-	printf("1. Shipping\n2. Payment\n3. Customer Services\n");
-	printf("4. Technical\n5. Return\n");
+	printf("1. Payment\n2.Customer Services \n3.Technical \n");
 	int category_choice;
 	printf("Select claim category:\n");
 	scanf("%d", &category_choice);
@@ -1070,8 +1084,7 @@ void manageUsers(struct UserArray* userArray) {
 
 const char* getCategoryString(enum ClaimCategory category) {
 	switch(category) {
-		case SHIPPING: return "shipping";
-		case RETURN: return "return";
+		
 		case PAYMENT: return "payment";
 		case CUSTOMER_SERVICES: return "customer service";
 		case TECHNICAL: return "technical";
@@ -1210,3 +1223,4 @@ void generateDailyReport(struct ClaimArray* claimArray, const char* filename) {
     fclose(reportFile);
     printf("Daily report generated successfully.\n");
 }
+
