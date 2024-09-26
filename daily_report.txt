@@ -1,9 +1,0 @@
-Daily Report for 2024-9-26
-
-New Complaints:
-_________________
-ID: 1, Username: admin, Category: payment, Priority: High [2024-09-26 16:46:08]
-
-Resolved Complaints:
-________________________
-ID: 1, Username: admin, Category: payment, Priority: High, Last Status Change: 2024-09-26 16:48:33

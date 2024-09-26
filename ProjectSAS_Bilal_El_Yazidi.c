@@ -65,23 +65,7 @@ struct User {
 	int is_locked;
 };
 
-void claimsIn24AndPending(struct ClaimArray* claimArray)
-{
-	for(int i=0;i<claimArray->count;i++)
-	{
-		long long diff = difftime(time(NULL) , claimArray->claims[i].submission_date);
-      if(diff<=3600&& claimArray->claims[i].status==PENDING)
-	  {
-		printf("%d\n,%d\n,%d\n,%d\n,%d\n,%d\n",
-		claimArray->claims[i].id,
-		claimArray->claims[i].description,
-		getCategoryString(claimArray->claims[i].category),
-		claimArray->claims[i].reason,
-		getStatusString(claimArray->claims[i].status),
-		getPriorityString(claimArray->claims[i].priority));
-	  }
-	}
-}
+
 struct Claim {
 	int id;
 	char username[MAX_USERNAME_LENGTH];
@@ -208,9 +192,9 @@ int main() {
 	while (1) {
 		if (!logged_in) {
 			printAsterics(25);
-			printf("Authentication Menu: \n");
+			printf("Login Menu: \n");
 			printAsterics(25);
-			printf("\n1. Login\n2. Register\n3. Exit\n\nChoice: ");
+			printf("\n1. Login\n2. SignUp\n3. Exit\n\nChoice: ");
 			scanf("%d", &choice);
 			getchar(); // Consume newline
 			padding(2);
@@ -273,12 +257,6 @@ int main() {
                     break;
                 case 2:
                     displayUserClaims(&claimArray, userArray.users[user_index].username, userArray.users[user_index].role);
-					
-					// if (userArray.users[user_index].role == CLIENT)
-                    // 	displayUserClaims(&claimArray, userArray.users[user_index].username, userArray.users[user_index].role);
-					// else {
-					// 	displayClaimsByPriority(&claimArray, userArray.users[user_index].username, userArray.users[user_index].role);
-					// }
                     break;
                 case 3:
                     if (userArray.users[user_index].role != CLIENT) {
@@ -528,13 +506,7 @@ int registerUser(struct UserArray* userArray) {
 	fgets(newUser.username, MAX_USERNAME_LENGTH, stdin);
 	newUser.username[strcspn(newUser.username, "\n")] = 0;
 	
-	// Check if username already exists
-	for (int i = 0; i < userArray->count; i++) {
-		if (strcmp(userArray->users[i].username, newUser.username) == 0) {
-			printf("Username already exists.\n");
-			return 0;
-		}
-	}
+	
 	
 	char password[MAX_PASSWORD_LENGTH];
 	do {
@@ -828,12 +800,7 @@ void searchClaims(struct ClaimArray* claimArray, enum UserRole role) {
 }
 
 void generateStatistics(struct ClaimArray* claimArray, char* filename) {
-    // Open the file in write mode
-    FILE* file = fopen(filename, "w");
-    if (file == NULL) {
-        printf("Error opening file for writing.\n");
-        return;
-    }
+    
 
     // Initialize variables
     int totalClaims = claimArray->count;
@@ -871,50 +838,47 @@ void generateStatistics(struct ClaimArray* claimArray, char* filename) {
         statusClaimCounts[claimArray->claims[i].status - 1]++;
     }
 
-    // Write statistics to file
-    fprintf(file, "Total Claims: %d\n", totalClaims);
+	printf( "Total Claims: %d\n", totalClaims);
 
-    fprintf(file, "**********************************\n");
-    fprintf(file, "Priority Metrics:\n");
-    fprintf(file, "**********************************\n");
+    printf( "**********************************\n");
+    printf( "Priority Metrics:\n");
+    printf( "**********************************\n");
     for (int i = 0; i < 4; i++) {
         double percentage = (double)priorityCounts[i] / totalClaims * 100;
-        fprintf(file, "Priority %s: %d (%.2f%%)\n", getPriorityString(i + 1), priorityCounts[i], percentage);
+        printf( "Priority %s: %d (%.2f%%)\n", getPriorityString(i + 1), priorityCounts[i], percentage);
     }
-    fprintf(file, "**********************************\n");
-    fprintf(file, "Status Metrics:\n");
-    fprintf(file, "**********************************\n");
+    printf( "**********************************\n");
+    printf( "Status Metrics:\n");
+    printf( "**********************************\n");
     for (int i = 0; i < 3; i++) {
         double percentage = (double)statusCounts[i] / totalClaims * 100;
-        fprintf(file, "Status %s: %d (%.2f%%)\n", getStatusString(i + 1), statusCounts[i], percentage);
+        printf( "Status %s: %d (%.2f%%)\n", getStatusString(i + 1), statusCounts[i], percentage);
     }
 
-    fprintf(file, "**********************************\n");
-    fprintf(file, "Category Metrics:\n");
-    fprintf(file, "**********************************\n");
+    printf( "**********************************\n");
+    printf( "Category Metrics:\n");
+    printf( "**********************************\n");
     for (int i = 0; i < 5; i++) {
         double percentage = (double)categoryCounts[i] / totalClaims * 100;
-        fprintf(file, "Category %s: %d (%.2f%%)\n", getCategoryString(i + 1), categoryCounts[i], percentage);
+        printf( "Category %s: %d (%.2f%%)\n", getCategoryString(i + 1), categoryCounts[i], percentage);
     }
 
-    fprintf(file, "**********************************\n");
-    fprintf(file, "Average Processing Time by Priority:\n");
-    fprintf(file, "**********************************\n");
+    printf( "**********************************\n");
+    printf( "Average Processing Time by Priority:\n");
+    printf( "**********************************\n");
     for (int i = 0; i < 4; i++) {
         double average_processing_time = priorityProcessingTimes[i] / priorityClaimCounts[i];
-        fprintf(file, "Priority %s: %.2f minutes\n", getPriorityString(i + 1), average_processing_time);
+        printf( "Priority %s: %.2f minutes\n", getPriorityString(i + 1), average_processing_time);
     }
-
-    fprintf(file, "**********************************\n");
-    fprintf(file, "Average Processing Time by Status:\n");
-    fprintf(file, "**********************************\n");
+    printf( "**********************************\n");
+    printf( "Average Processing Time by Status:\n");
+    printf( "**********************************\n");
     for (int i = 0; i < 3; i++) {
         double average_processing_time = statusProcessingTimes[i] / statusClaimCounts[i];
-        fprintf(file, "Status %s: %.2f minutes\n", getStatusString(i + 1), average_processing_time);
+        printf( "Status %s: %.2f minutes\n", getStatusString(i + 1), average_processing_time);
     }
 
-    // Close the file
-    fclose(file);
+    
 }
 
 
