@@ -1,1190 +1,1264 @@
+/**
+ * ProjectSAS_Bilal_El_Yazidi.c
+ *
+ * Claims Management System
+ * A console-based application for submitting, tracking, and managing
+ * customer claims. Supports three user roles: Admin, Claim Agent, Client.
+ *
+ * Author : Bilal El Yazidi
+ * Build  : gcc -Wall -Wextra -std=c11 -o claims ProjectSAS_Bilal_El_Yazidi.c
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <ctype.h>
-#include <limits.h>
 
-// Global Constants
+/* ============================================================
+ * PORTABLE HELPERS
+ * ============================================================ */
 
-#define MAX_USERNAME_LENGTH 50
-#define MAX_PASSWORD_LENGTH 50
+/**
+ * my_strdup — portable replacement for POSIX strdup().
+ * Allocates a copy of src on the heap; caller must free().
+ */
+static char *my_strdup(const char *src) {
+    size_t len = strlen(src) + 1;
+    char  *dup = malloc(len);
+    if (dup) memcpy(dup, src, len);
+    return dup;
+}
+
+/**
+ * my_strcasecmp — portable, locale-independent case-insensitive string compare.
+ * Returns 0 if strings are equal ignoring case, <0 or >0 otherwise.
+ */
+static int my_strcasecmp(const char *a, const char *b) {
+    while (*a && *b) {
+        int diff = tolower((unsigned char)*a) - tolower((unsigned char)*b);
+        if (diff != 0) return diff;
+        a++; b++;
+    }
+    return tolower((unsigned char)*a) - tolower((unsigned char)*b);
+}
+
+/* ============================================================
+ * CONSTANTS
+ * ============================================================ */
+
+#define MAX_USERNAME_LENGTH    50
+#define MAX_PASSWORD_LENGTH    50
 #define MAX_DESCRIPTION_LENGTH 500
-#define MAX_REASON_LENGTH 100
-#define MAX_CATEGORY_LENGTH 100
-#define MAX_STATUS_LENGTH 20
-#define MAX_FILENAME_LENGTH 100
-#define DATE_STRING_LENGTH 11 // YYYY-MM-DD\0
+#define MAX_REASON_LENGTH      100
+#define DATE_STRING_LENGTH     20   /* "YYYY-MM-DD HH:MM:SS\0" */
 
-
-// Files 
-
-#define SESSION_FILE "session.txt"
-#define USERS_FILE "users.txt"
-#define CLAIMS_FILE "claims.txt"
-#define STATISTICS_FILE "statistics.txt"
+#define USERS_FILE        "users.txt"
+#define CLAIMS_FILE       "claims.txt"
+#define STATISTICS_FILE   "statistics.txt"
 #define DAILY_REPORT_FILE "daily_report.txt"
 
+#define LOCKOUT_SECONDS    1800   /* 30 minutes */
+#define SESSION_SECONDS    1800   /* 30 minutes */
+#define MAX_LOGIN_ATTEMPTS 3
 
-
+/* ============================================================
+ * ENUMERATIONS
+ *
+ * Enum values start at 0 so they can be used directly as array
+ * indices — no arithmetic adjustments needed.
+ * ============================================================ */
 
 enum UserRole {
-	ADMIN,
-	CLAIM_AGENT,
-	CLIENT
+    ADMIN       = 0,
+    CLAIM_AGENT = 1,
+    CLIENT      = 2
 };
 
 enum ClaimStatus {
-	PENDING,
-	IN_PROGRESS,
-	RESOLVED,
-	REJECTED
+    PENDING     = 0,
+    IN_PROGRESS = 1,
+    RESOLVED    = 2,
+    REJECTED    = 3
 };
 
 enum ClaimPriority {
-	LOW,
-	MEDIUM,
-	HIGH
+    LOW    = 0,
+    MEDIUM = 1,
+    HIGH   = 2
 };
 
 enum ClaimCategory {
-	// SHIPPING,
-	PAYMENT,
-	CUSTOMER_SERVICES,
-	TECHNICAL,
-	// RETURN
+    PAYMENT           = 0,
+    CUSTOMER_SERVICES = 1,
+    TECHNICAL         = 2
 };
+
+/* ============================================================
+ * DATA STRUCTURES
+ * ============================================================ */
 
 struct User {
-	char username[MAX_USERNAME_LENGTH];
-	char password[MAX_PASSWORD_LENGTH];
-	enum UserRole role;
-	time_t last_login;
-	time_t lockoutTime;
-	int failed_attempts;
-	int is_locked;
+    char           username[MAX_USERNAME_LENGTH];
+    char           password[MAX_PASSWORD_LENGTH];
+    enum UserRole  role;
+    time_t         last_login;
+    time_t         lockoutTime;      /* when the lockout started */
+    int            failed_attempts;
+    int            is_locked;
 };
-
 
 struct Claim {
-	int id;
-	char username[MAX_USERNAME_LENGTH];
-	char description[MAX_DESCRIPTION_LENGTH];
-	enum ClaimCategory category;
-	char reason[MAX_REASON_LENGTH];  
-	enum ClaimStatus status;
-	enum ClaimPriority priority;
-	time_t submission_date;
-	time_t last_status_change; 
-    char resolution_note[MAX_DESCRIPTION_LENGTH];
+    int                  id;
+    char                 username[MAX_USERNAME_LENGTH];
+    char                 description[MAX_DESCRIPTION_LENGTH];
+    enum ClaimCategory   category;
+    char                 reason[MAX_REASON_LENGTH];
+    enum ClaimStatus     status;
+    enum ClaimPriority   priority;
+    time_t               submission_date;
+    time_t               last_status_change;
+    char                 resolution_note[MAX_DESCRIPTION_LENGTH];
 };
 
+/* Dynamic arrays (grow by doubling) */
 struct UserArray {
-	struct User* users;
-	int count;
-	int capacity;
+    struct User *users;
+    int          count;
+    int          capacity;
 };
 
 struct ClaimArray {
-	struct Claim* claims;
-	int count;
-	int capacity;
+    struct Claim *claims;
+    int           count;
+    int           capacity;
 };
 
-// Function prototypes
+/* ============================================================
+ * FUNCTION PROTOTYPES
+ * ============================================================ */
 
-//intiate Arrays
-void initUserArray(struct UserArray* userArray);
-void initClaimArray(struct ClaimArray* claimArray);
+/* --- Array management --- */
+void initUserArray(struct UserArray *ua);
+void initClaimArray(struct ClaimArray *ca);
+void addUser(struct UserArray *ua, struct User user);
+void addClaim(struct ClaimArray *ca, struct Claim claim);
 
-void addUser(struct UserArray* userArray, struct User user);
-void addClaim(struct ClaimArray* claimArray, struct Claim claim);
+/* --- File persistence ---
+ * File format — users (7 comma-separated fields per line):
+ *   username,password,role,last_login,lockoutTime,failed_attempts,is_locked
+ * File format — claims (10 comma-separated fields per line):
+ *   id,username,description,category,reason,status,priority,
+ *   submission_date,last_status_change,resolution_note
+ */
+void saveUsersToFile(struct UserArray *ua, const char *filename);
+void loadUsersFromFile(struct UserArray *ua, const char *filename);
+void saveClaimsToFile(struct ClaimArray *ca, const char *filename);
+void loadClaimsFromFile(struct ClaimArray *ca, const char *filename);
 
-// Loading & Saving data from .txt after closing and repopening
-void saveUsersToFile(struct UserArray* userArray, const char* filename);
-void loadUsersFromFile(struct UserArray* userArray, const char* filename);
-void saveClaimsToFile(struct ClaimArray* claimArray, const char* filename);
-void loadClaimsFromFile(struct ClaimArray* claimArray, const char* filename);
+/* --- Authentication --- */
+int  authenticateUser(struct UserArray *ua, const char *username, const char *password);
+int  isSessionValid(time_t lastLogin);
+int  registerUser(struct UserArray *ua);
+int  isPasswordValid(const char *password, const char *username);
 
-int authenticateUser(struct UserArray* userArray, const char* username, const char* password);
-int isSessionValid(time_t lastLogin);
+/* --- Date helpers --- */
+void   formatDate(time_t timestamp, char *dateStr);
+time_t parseDate(const char *dateStr);
 
-void updateUserRole(struct UserArray* userArray, const char* username, enum UserRole newRole);
-void displayClaimsByPriority(struct ClaimArray* claimArray, const char* username, enum UserRole role);
+/* --- Priority inference --- */
+enum ClaimPriority inferPriorityFromDescription(const char *description);
 
-int registerUser(struct UserArray* userArray);
-int isPasswordValid(const char* password, const char* username);
+/* --- Claim operations --- */
+void submitClaim(struct ClaimArray *ca, const char *username);
+void displayUserClaims(struct ClaimArray *ca, const char *username, enum UserRole role);
+void searchClaims(struct ClaimArray *ca, enum UserRole role);
+void manageClaims(struct ClaimArray *ca, const char *username, enum UserRole role, int claim_id);
+int  compareClaims(const void *a, const void *b);
 
-// Function to convert between time_t and YYYY-MM-DD string
-void formatDate(time_t timestamp, char* dateStr);
-time_t parseDate(const char* dateStr);
+/* --- Admin operations --- */
+void manageUsers(struct UserArray *ua);
+void generateStatistics(struct ClaimArray *ca, const char *filename);
+void generateDailyReport(struct ClaimArray *ca, const char *filename);
 
-//Claim management and display
-void submitClaim(struct ClaimArray* claimArray, const char* username);
-void displayUserClaims(struct ClaimArray* claimArray, const char* username, enum UserRole role);
-void searchClaims(struct ClaimArray* claimArray, enum UserRole role);
-void generateStatistics(struct ClaimArray* claimArray, char* filename);
-void manageClaims(struct ClaimArray* claimArray, const char* username, enum UserRole role, int claim_id);
-int compareClaims(const void* a, const void* b);
+/* --- Enum → string helpers --- */
+const char *getPriorityString(enum ClaimPriority priority);
+const char *getCategoryString(enum ClaimCategory category);
+const char *getStatusString(enum ClaimStatus status);
 
-//User management
-void manageUsers(struct UserArray* userArray);
-
-
-// Handling enums
-const char* getPriorityString(enum ClaimPriority priority);
-const char* getCategoryString(enum ClaimCategory category);
-const char* getStatusString(enum ClaimStatus status);
-int isWithin24Hours(time_t submissionTime);
-char* strcasestr_custom(const char* haystack, const char* needle);
-
-// Display
+/* --- Display utilities --- */
+int  isWithin24Hours(time_t submissionTime);
 void printLine(int num);
 void printSlashes(int num);
 void printAsterics(int num);
 void padding(int num);
-void printTableHeader();
-void printTableFooter();
-void printTableRow(int id, const char* category, const char* status, const char* priority, const char* username, const char* date);
 
+/* ============================================================
+ * MAIN
+ * ============================================================ */
 
-// Stats
-void generateDailyReport(struct ClaimArray* claimArray, const char* filename);
+int main(void) {
+    struct UserArray  ua;
+    struct ClaimArray ca;
 
+    initUserArray(&ua);
+    initClaimArray(&ca);
 
-int main() {
-	struct UserArray userArray;
-	struct ClaimArray claimArray;
-	
-	initUserArray(&userArray);
-	initClaimArray(&claimArray);
-	
-	// Loading
-	loadUsersFromFile(&userArray, USERS_FILE);
-	loadClaimsFromFile(&claimArray, CLAIMS_FILE);
-	
-	int choice, claim_id, logged_in = 0;
-	int user_index = -1;
-	char username[MAX_USERNAME_LENGTH];
-	char password[MAX_PASSWORD_LENGTH];
-	
-	int adminExists = 0;
-	for (int i = 0; i < userArray.count; i++) {
-		if (userArray.users[i].role == ADMIN) {
-			adminExists = 1;
-			break;
-		}
-	}
-	
-	if (!adminExists) {
-		struct User admin;
-		strcpy(admin.username, "admin");
-		strcpy(admin.password, "Admin!123");  
-		admin.role = ADMIN;
-		admin.last_login = time(NULL);
-		admin.failed_attempts = 0;
-		admin.is_locked = 0;
-		addUser(&userArray, admin);
-		printf("Default admin user created. Username: admin, Password: Admin123!\n");
-		saveUsersToFile(&userArray, USERS_FILE);
-	}
-	
-	while (1) {
-		if (!logged_in) {
-			printAsterics(25);
-			printf("Login Menu: \n");
-			printAsterics(25);
-			printf("\n1. Login\n2. SignUp\n3. Exit\n\nChoice: ");
-			scanf("%d", &choice);
-			getchar(); // Consume newline
-			padding(2);
-			switch (choice) {
-				case 1:
-					printLine(20);
-					printf("Username: ");
-					fgets(username, MAX_USERNAME_LENGTH, stdin);
-					username[strcspn(username, "\n")] = 0;
-					printf("Password: ");
-					fgets(password, MAX_PASSWORD_LENGTH, stdin);
-					password[strcspn(password, "\n")] = 0;
-					printLine(20);
-					
-					user_index = authenticateUser(&userArray, username, password);
-					if (user_index != -1) {
-						logged_in = 1;
-						printf("Login successful!");
-						userArray.users[user_index].last_login = time(NULL); // Update last login time
+    loadUsersFromFile(&ua, USERS_FILE);
+    loadClaimsFromFile(&ca, CLAIMS_FILE);
 
-						padding(2);
-					} else {
-						printf("Login failed.\n");
-					}
-					break;
-				case 2:
-					if (registerUser(&userArray)) {
-						printf("Registration successful!\n");
-						saveUsersToFile(&userArray, USERS_FILE);
-					}
-					break;
-				case 3:
-					goto cleanup;
-				default:
-					printf("Invalid choice.\n");
-			}
-		} else {
-			if (!isSessionValid(userArray.users[user_index].last_login)) {
-				printf("Session expired. Please login again.\n");
-				logged_in = 0;
-				continue;
-			}
-			printLine(20);
-			printf("\n1. Submit Claim\n2. View Claims\n");
-            if (userArray.users[user_index].role != CLIENT) {
-                printf("3. Search Claims\n4. Manage Claims\n");
-            }
-            if (userArray.users[user_index].role == ADMIN) {
-                printf("5. Generate Statistics\n6. Generate daily report\n7. Manage Users\n");
-            }
-			printf("0. Logout\n\nChoice: ");
-			printLine(10);
-			scanf("%d", &choice);
-			getchar(); // Consume newline
-			
-			switch (choice) {
+    /* Ensure at least one admin account exists */
+    int adminExists = 0;
+    for (int i = 0; i < ua.count; i++) {
+        if (ua.users[i].role == ADMIN) { adminExists = 1; break; }
+    }
+    if (!adminExists) {
+        struct User admin;
+        strcpy(admin.username,  "admin");
+        strcpy(admin.password,  "Admin!123");
+        admin.role            = ADMIN;
+        admin.last_login      = time(NULL);
+        admin.lockoutTime     = 0;
+        admin.failed_attempts = 0;
+        admin.is_locked       = 0;
+        addUser(&ua, admin);
+        printf("Default admin created.  Username: admin   Password: Admin!123\n");
+        saveUsersToFile(&ua, USERS_FILE);
+    }
+
+    int  choice, claim_id;
+    int  logged_in = 0;
+    int  user_index = -1;
+    char username[MAX_USERNAME_LENGTH];
+    char password[MAX_PASSWORD_LENGTH];
+
+    while (1) {
+
+        /* ---- NOT LOGGED IN ---- */
+        if (!logged_in) {
+            printAsterics(30);
+            printf("  CLAIMS MANAGEMENT SYSTEM\n");
+            printAsterics(30);
+            printf("\n1. Login\n2. Sign Up\n3. Exit\n\nChoice: ");
+            if (scanf("%d", &choice) != 1) { getchar(); continue; }
+            getchar();
+            padding(1);
+
+            switch (choice) {
                 case 1:
-                    submitClaim(&claimArray, userArray.users[user_index].username);
-                    saveClaimsToFile(&claimArray, CLAIMS_FILE);
+                    printLine(30);
+                    printf("Username: ");
+                    fgets(username, MAX_USERNAME_LENGTH, stdin);
+                    username[strcspn(username, "\n")] = 0;
+                    printf("Password: ");
+                    fgets(password, MAX_PASSWORD_LENGTH, stdin);
+                    password[strcspn(password, "\n")] = 0;
+                    printLine(30);
+
+                    user_index = authenticateUser(&ua, username, password);
+                    if (user_index != -1) {
+                        logged_in = 1;
+                        ua.users[user_index].last_login = time(NULL);
+                        saveUsersToFile(&ua, USERS_FILE);
+                        padding(1);
+                    }
                     break;
+
                 case 2:
-                    displayUserClaims(&claimArray, userArray.users[user_index].username, userArray.users[user_index].role);
+                    if (registerUser(&ua)) {
+                        printf("Registration successful!\n");
+                        saveUsersToFile(&ua, USERS_FILE);
+                    }
                     break;
+
                 case 3:
-                    if (userArray.users[user_index].role != CLIENT) {
-                        searchClaims(&claimArray, userArray.users[user_index].role);
-                    } else {
-                        printf("Invalid choice.\n");
-                    }
-                    break;
-                case 4:
-					printf("Enter claim ID to manage: ");
-					scanf("%d", &claim_id);
-                    if (userArray.users[user_index].role != CLIENT) {
-                        manageClaims(&claimArray, userArray.users[user_index].username, userArray.users[user_index].role, claim_id);
-                        saveClaimsToFile(&claimArray, CLAIMS_FILE);
-                    } else {
-                        printf("Invalid choice.\n");
-                    }
-                    break;
-				case 5:
-					if (userArray.users[user_index].role != CLIENT) {
-						generateStatistics(&claimArray, STATISTICS_FILE);
-					} else {
-						printf("Access denied.\n");
-					}
-					break;
-				case 6:
-					if (userArray.users[user_index].role == ADMIN) {
-						generateDailyReport(&claimArray, DAILY_REPORT_FILE);
-					}
-					break;
-				case 7:
-					if (userArray.users[user_index].role == ADMIN) {
-						manageUsers(&userArray);
-						saveUsersToFile(&userArray, USERS_FILE);
-					} else {
-						printf("Access denied.\n");
-					}
-					break;
-				case 0:
-					logged_in = 0;
-					printf("Logged out successfully.");
-					    userArray.users[user_index].last_login = 0; // Update last login time
-					padding(2);
-					break;
-				default:
-					printf("Invalid choice.\n");
-			}
-		}
-	}
-	
-cleanup:
-	saveUsersToFile(&userArray, USERS_FILE);
-	saveClaimsToFile(&claimArray, CLAIMS_FILE);
-	
-	free(userArray.users);
-	free(claimArray.claims);
-	
-	return 0;
-}
+                    goto cleanup;
 
-void initUserArray(struct UserArray* userArray) {
-	userArray->capacity = 10;
-	userArray->count = 0;
-	userArray->users = malloc(userArray->capacity * sizeof(struct User));
-}
-
-void initClaimArray(struct ClaimArray* claimArray) {
-	claimArray->capacity = 10;
-	claimArray->count = 0;
-	claimArray->claims = malloc(claimArray->capacity * sizeof(struct Claim));
-}
-
-void addUser(struct UserArray* userArray, struct User user) {
-    // Check for duplicate usernames
-    for (int i = 0; i < userArray->count; i++) {
-        if (strcmp(userArray->users[i].username, user.username) == 0) {
-            printf("Username already exists.\n");
-            return;
-        }  
-    }
-	if (userArray->count == userArray->capacity) {
-		userArray->capacity *= 2;
-		userArray->users = realloc(userArray->users, userArray->capacity * sizeof(struct User));
-	}
-	userArray->users[userArray->count++] = user;
-}
-
-void addClaim(struct ClaimArray* claimArray, struct Claim claim) {
-	if (claimArray->count == claimArray->capacity) {
-		claimArray->capacity *= 2;
-		claimArray->claims = realloc(claimArray->claims, claimArray->capacity * sizeof(struct Claim));
-	}
-	claimArray->claims[claimArray->count++] = claim;
-}
-
-// Function to check if an account is locked
-
-
-// Loading & Saving
-void saveUsersToFile(struct UserArray* userArray, const char* filename) {
-	FILE* file = fopen(filename, "w");
-	if (file == NULL) {
-		printf("Error opening file for writing.\n");
-		return;
-	}
-	fprintf(file, "%d\n", userArray->count);
-	for (int i = 0; i < userArray->count; i++) {
-		fprintf(file, "%s,%s,%d,%ld,%d,%d\n", 
-			userArray->users[i].username,
-			userArray->users[i].password,
-			userArray->users[i].role,
-			userArray->users[i].last_login,
-			userArray->users[i].failed_attempts,
-			userArray->users[i].is_locked);
-	}
-	fclose(file);
-}
-
-void loadUsersFromFile(struct UserArray* userArray, const char* filename) {
-	FILE* file = fopen(filename, "r");
-	if (file == NULL) {
-		return;
-	}
-	int count;
-	fscanf(file, "%d\n", &count);
-	for (int i = 0; i < count; i++) {
-		struct User user;
-		fscanf(file, "%[^,],%[^,],%d,%ld,%d,%d\n", 
-			user.username,
-			user.password,
-			&user.role,
-			&user.last_login,
-			&user.failed_attempts,
-			&user.is_locked);
-		addUser(userArray, user);
-	}
-	fclose(file);
-}
-
-void saveClaimsToFile(struct ClaimArray* claimArray, const char* filename) {
-	FILE* file = fopen(filename, "w");
-	if (file == NULL) {
-		printf("Error opening file for writing.\n");
-		return;
-	}
-	fprintf(file, "%d\n", claimArray->count);
-	for (int i = 0; i < claimArray->count; i++) {
-		if (fprintf(file, "%d,%s,%s,%d,%s,%d,%d,%ld,%ld,%s\n",
-			claimArray->claims[i].id,
-			claimArray->claims[i].username,
-			claimArray->claims[i].description,
-			claimArray->claims[i].category,
-			claimArray->claims[i].reason,
-			claimArray->claims[i].status,
-			claimArray->claims[i].priority,
-			claimArray->claims[i].submission_date,
-			claimArray->claims[i].last_status_change,
-			claimArray->claims[i].resolution_note) < 0) {
-				printf("Error writing claim to file.\n");
-				fclose(file);
-				return;
-			}
-	}
-	fclose(file);
-	printf("Claims saved successfully.\n");
-}
-
-
-void loadClaimsFromFile(struct ClaimArray* claimArray, const char* filename) {
-	FILE* file = fopen(filename, "r");
-	if (file == NULL) {
-		return;
-	}
-	int count;
-	if (fscanf(file, "%d\n", &count) != 1) {
-		printf("Error reading claim count from file.\n");
-		fclose(file);
-		return;
-	}
-	for (int i = 0; i < count; i++) {
-		struct Claim claim;
-		if (fscanf(file, "%d,%[^,],%[^,],%d,%[^,],%d,%d,%ld,%ld,%[^,]\n",
-			&claim.id,
-			claim.username,
-			claim.description,
-			&claim.category,
-			claim.reason,
-			&claim.status,
-			&claim.priority,
-			&claim.submission_date,
-			&claim.last_status_change,
-            claim.resolution_note) != 10) {
-				printf("Error reading claim from file. Skipping.\n");
-				continue;
-			}
-		addClaim(claimArray, claim);
-	}
-	fclose(file);
-	printf("Claims loaded successfully.\n");
-}
-
-int authenticateUser(struct UserArray* userArray, const char* username, const char* password) {
-    for (int i = 0; i < userArray->count; i++) {
-        if (strcmp(userArray->users[i].username, username) == 0) {
-            if (userArray->users[i].is_locked == 1) {
-                time_t currentTime = time(NULL);
-                if (currentTime - userArray->users[i].lockoutTime < 1800) { // 1800 seconds = 30 minutes
-                    printf("Account is locked. You have attempted to sign in too many times.\n");
-                    printf("Please try again after 30 minutes.\n");
-                    return -1;
-                } else {
-                    userArray->users[i].is_locked = 0;
-                    userArray->users[i].failed_attempts = 0;
-                }
+                default:
+                    printf("Invalid choice.\n");
             }
 
-            if (strcmp(userArray->users[i].password, password) == 0) {
-                userArray->users[i].failed_attempts = 0;
-                printf("Welcome, %s! You have successfully signed in.\n", username);
-                return i; // Return the user ID
-            } else {
-                userArray->users[i].failed_attempts++;
-                if (userArray->users[i].failed_attempts >= 3) {
-                    userArray->users[i].lockoutTime = time(NULL);
-                    userArray->users[i].is_locked = 1;
-                    printf("Account locked due to 3 failed sign-in attempts.\n");
-                    printf("Please try again after 30 minutes.\n");
-                } else {
-                    printf("Invalid password. You have %d attempts remaining.\n", 3 - userArray->users[i].failed_attempts);
-                }
-                return -1; // Authentication failed
-            }
-        }
-    }
-    printf("User not found. Please check your username and try again.\n");
-    return -1; // User not found
-}
-
-int isSessionValid(time_t lastLogin) {
-	time_t currentTime = time(NULL);
-	return (currentTime - lastLogin) <= 1800;  // 30 minutes = 1800 seconds
-}
-
-int registerUser(struct UserArray* userArray) {
-	struct User newUser;
-	printf("Enter username: ");
-	fgets(newUser.username, MAX_USERNAME_LENGTH, stdin);
-	newUser.username[strcspn(newUser.username, "\n")] = 0;
-	
-	
-	
-	char password[MAX_PASSWORD_LENGTH];
-	do {
-		printf("Enter password: ");
-		fgets(password, MAX_PASSWORD_LENGTH, stdin);
-		password[strcspn(password, "\n")] = 0;
-		
-		if (!isPasswordValid(password, newUser.username)) {
-			printf("Invalid password. Please try again.\n");
-		}
-	} while (!isPasswordValid(password, newUser.username));
-	
-	strcpy(newUser.password, password);
-	newUser.role = CLIENT;
-	newUser.last_login = time(NULL);
-	newUser.failed_attempts = 0;
-	newUser.is_locked = 0;
-	
-	addUser(userArray, newUser);
-	return 1;
-}
-
-int isPasswordValid(const char* password, const char* username) {
-	int len = strlen(password);
-	int has_upper = 0, has_lower = 0, has_digit = 0, has_special = 0, has_username;
-	
-	if (len < 8) return 0;
-	if (strstr(password, username) != NULL) return 0;
-	
-	for (int i = 0; i < len; i++) {
-		if (isupper(password[i])) has_upper = 1;
-		else if (islower(password[i])) has_lower = 1;
-		else if (isdigit(password[i])) has_digit = 1;
-		else if (strchr("!@#$%^&*", password[i])) has_special = 1;
-	}
-	return has_upper && has_lower && has_digit && has_special;
-}
-
-// Function to convert time_t to YYYY-MM-DD string
-// 
-
-void formatDate(time_t timestamp, char* dateStr) {
-    struct tm* tm = localtime(&timestamp);
-    if (tm == NULL) {
-        // Handle error: unable to convert timestamp to local time
-        strcpy(dateStr, "Error: unable to format date");
-        return;
-    }
-    strftime(dateStr, 20, "%Y-%m-%d %H:%M:%S", tm);
-}
-
-// Function to convert YYYY-MM-DD string to time_t
-time_t parseDate(const char* dateStr) {
-	struct tm tm_info = {0};
-	sscanf(dateStr, "%d-%d-%d", &tm_info.tm_year, &tm_info.tm_mon, &tm_info.tm_mday);
-	tm_info.tm_year -= 1900;  // Adjust year
-	tm_info.tm_mon -= 1;      // Adjust month
-	return mktime(&tm_info);
-}
-
-void submitClaim(struct ClaimArray* claimArray, const char* username) {
-	struct Claim newClaim;
-	newClaim.id = claimArray->count + 1;
-	strcpy(newClaim.username, username);
-	
-	printAsterics(30);
-	printf("Enter claim description: ");
-	fgets(newClaim.description, MAX_DESCRIPTION_LENGTH, stdin);
-	newClaim.description[strcspn(newClaim.description, "\n")] = 0;
-	
-	printf("Enter claim reason: ");
-	fgets(newClaim.reason, MAX_REASON_LENGTH, stdin);
-	newClaim.reason[strcspn(newClaim.reason, "\n")] = 0;
-	
-	printAsterics(30);
-	printf("1. Payment\n2.Customer Services \n3.Technical \n");
-	int category_choice;
-	printf("Select claim category:\n");
-	scanf("%d", &category_choice);
-	getchar(); // Consume newline
-	newClaim.category = (enum ClaimCategory)(category_choice - 1);
-	
-	newClaim.status = PENDING;
-	newClaim.submission_date = time(NULL);
-	newClaim.last_status_change = newClaim.submission_date;
-	
-	// Assign priority based on keywords in description
-	char *description_lower = strdup(newClaim.description);
-	for (int i = 0; description_lower[i]; i++) {
-		description_lower[i] = tolower(description_lower[i]);
-	}
-	
-	if (strstr(description_lower, "urgent") || strstr(description_lower, "emergency") || 
-		strstr(description_lower, "critical") || strstr(description_lower, "severe")) {
-			newClaim.priority = HIGH;
-		} else if (strstr(description_lower, "important") || strstr(description_lower, "significant") || 
-			strstr(description_lower, "moderate")) {
-				newClaim.priority = MEDIUM;
-			} else {
-				newClaim.priority = LOW;
-			}
-	
-	free(description_lower);
-	
-	addClaim(claimArray, newClaim);
-	printf("Claim submitted successfully. Priority: %s\n", 
-		newClaim.priority == HIGH ? "High" : 
-		(newClaim.priority == MEDIUM ? "Medium" : "Low"));
-}
-
-int compareClaims(const void* a, const void* b) {
-	const struct Claim* claimA = (const struct Claim*)a;
-	const struct Claim* claimB = (const struct Claim*)b;
-	
-	// Sort by priority (HIGH to LOW)
-	if (claimA->priority != claimB->priority) {
-		return claimB->priority - claimA->priority;
-	}
-	
-	// If priorities are the same, sort by submission date (newest first)
-	return difftime(claimB->submission_date, claimA->submission_date);
-}
-
-void displayUserClaims(struct ClaimArray* claimArray, const char* username, enum UserRole role) {
-    printf("Your Claims List:\n");
-    printAsterics(140);
-    printf("%-5s %-15s %-10s %-10s %-20s %-20s\n", "ID", "Category", "Status", "Priority", "Date", "Username");
-    printAsterics(140);
-	// qsort compares every two adjacent elementes using the compareClaims function
-	qsort(claimArray->claims, claimArray->count, sizeof(struct Claim), compareClaims);
-    for (int i = 0; i < claimArray->count; i++) {
-        if (strcmp(claimArray->claims[i].username, username) == 0 || role != CLIENT) {
-            char dateStr[20];
-            formatDate(claimArray->claims[i].submission_date, dateStr);
-            if (strcmp(dateStr, "Error: unable to format date") == 0) {
-                printf("Error: unable to format date\n");
+        /* ---- LOGGED IN ---- */
+        } else {
+            if (!isSessionValid(ua.users[user_index].last_login)) {
+                printf("Session expired. Please login again.\n");
+                logged_in = 0;
                 continue;
             }
-            printf("%-5d %-15s %-10s %-10s %-20s %-20s\n",
-                claimArray->claims[i].id,
-                getCategoryString(claimArray->claims[i].category),
-                getStatusString(claimArray->claims[i].status),
-                getPriorityString(claimArray->claims[i].priority),
-                dateStr,
-                claimArray->claims[i].username);
-            printf("Description: %s\n", claimArray->claims[i].description);
-            printf("Reason: %s\n", claimArray->claims[i].reason);
 
-            if (claimArray->claims[i].status != PENDING && strlen(claimArray->claims[i].resolution_note) > 0) {
-                printLine(10);
-                printf("Resolution Note: %s\n", claimArray->claims[i].resolution_note);
-            }
-            printAsterics(140);
+            enum UserRole role = ua.users[user_index].role;
 
-            if (role == CLIENT && isWithin24Hours(claimArray->claims[i].submission_date)) {
-                // printf("Options: 1. Modify 2. Delete\n");
+            printLine(30);
+            printf("\n1. Submit Claim\n2. View My Claims\n");
+            if (role != CLIENT) printf("3. Search Claims\n4. Manage a Claim\n");
+            if (role == ADMIN)  printf("5. Generate Statistics\n6. Generate Daily Report\n7. Manage Users\n");
+            printf("0. Logout\n\nChoice: ");
+            printLine(10);
+            if (scanf("%d", &choice) != 1) { getchar(); continue; }
+            getchar();
+
+            switch (choice) {
+                case 1:
+                    submitClaim(&ca, ua.users[user_index].username);
+                    saveClaimsToFile(&ca, CLAIMS_FILE);
+                    break;
+
+                case 2:
+                    displayUserClaims(&ca, ua.users[user_index].username, role);
+                    break;
+
+                case 3:
+                    if (role != CLIENT) {
+                        searchClaims(&ca, role);
+                    } else {
+                        printf("Access denied.\n");
+                    }
+                    break;
+
+                case 4:
+                    if (role != CLIENT) {
+                        printf("Enter claim ID to manage: ");
+                        if (scanf("%d", &claim_id) == 1) {
+                            getchar();
+                            manageClaims(&ca, ua.users[user_index].username, role, claim_id);
+                            saveClaimsToFile(&ca, CLAIMS_FILE);
+                        } else {
+                            getchar();
+                            printf("Invalid ID.\n");
+                        }
+                    } else {
+                        printf("Access denied.\n");
+                    }
+                    break;
+
+                case 5:
+                    if (role == ADMIN) {
+                        generateStatistics(&ca, STATISTICS_FILE);
+                    } else {
+                        printf("Access denied.\n");
+                    }
+                    break;
+
+                case 6:
+                    if (role == ADMIN) {
+                        generateDailyReport(&ca, DAILY_REPORT_FILE);
+                    } else {
+                        printf("Access denied.\n");
+                    }
+                    break;
+
+                case 7:
+                    if (role == ADMIN) {
+                        manageUsers(&ua);
+                        saveUsersToFile(&ua, USERS_FILE);
+                    } else {
+                        printf("Access denied.\n");
+                    }
+                    break;
+
+                case 0:
+                    logged_in = 0;
+                    ua.users[user_index].last_login = 0;
+                    printf("Logged out successfully.\n");
+                    padding(1);
+                    break;
+
+                default:
+                    printf("Invalid choice.\n");
             }
-            printf("\n");
         }
     }
 
+cleanup:
+    saveUsersToFile(&ua, USERS_FILE);
+    saveClaimsToFile(&ca, CLAIMS_FILE);
+    free(ua.users);
+    free(ca.claims);
+    return 0;
+}
+
+/* ============================================================
+ * ARRAY MANAGEMENT
+ * ============================================================ */
+
+void initUserArray(struct UserArray *ua) {
+    ua->capacity = 10;
+    ua->count    = 0;
+    ua->users    = malloc(ua->capacity * sizeof(struct User));
+}
+
+void initClaimArray(struct ClaimArray *ca) {
+    ca->capacity = 10;
+    ca->count    = 0;
+    ca->claims   = malloc(ca->capacity * sizeof(struct Claim));
+}
+
+/**
+ * addUser — inserts a user, rejecting duplicate usernames.
+ * Doubles the array capacity when full.
+ */
+void addUser(struct UserArray *ua, struct User user) {
+    for (int i = 0; i < ua->count; i++) {
+        if (strcmp(ua->users[i].username, user.username) == 0) {
+            printf("Username '%s' already exists.\n", user.username);
+            return;
+        }
+    }
+    if (ua->count == ua->capacity) {
+        ua->capacity *= 2;
+        ua->users = realloc(ua->users, ua->capacity * sizeof(struct User));
+    }
+    ua->users[ua->count++] = user;
+}
+
+/**
+ * addClaim — appends a claim, doubling capacity when full.
+ */
+void addClaim(struct ClaimArray *ca, struct Claim claim) {
+    if (ca->count == ca->capacity) {
+        ca->capacity *= 2;
+        ca->claims = realloc(ca->claims, ca->capacity * sizeof(struct Claim));
+    }
+    ca->claims[ca->count++] = claim;
+}
+
+/* ============================================================
+ * FILE PERSISTENCE
+ * ============================================================ */
+
+void saveUsersToFile(struct UserArray *ua, const char *filename) {
+    FILE *f = fopen(filename, "w");
+    if (!f) { printf("Error: cannot open '%s' for writing.\n", filename); return; }
+
+    fprintf(f, "%d\n", ua->count);
+    for (int i = 0; i < ua->count; i++) {
+        fprintf(f, "%s,%s,%d,%ld,%ld,%d,%d\n",
+            ua->users[i].username,
+            ua->users[i].password,
+            (int)ua->users[i].role,
+            (long)ua->users[i].last_login,
+            (long)ua->users[i].lockoutTime,   /* field added — fixes lockout persistence */
+            ua->users[i].failed_attempts,
+            ua->users[i].is_locked);
+    }
+    fclose(f);
+}
+
+void loadUsersFromFile(struct UserArray *ua, const char *filename) {
+    FILE *f = fopen(filename, "r");
+    if (!f) return;
+
+    int count;
+    if (fscanf(f, "%d\n", &count) != 1) { fclose(f); return; }
+
+    for (int i = 0; i < count; i++) {
+        struct User user;
+        int  role, failed, locked;
+        long last_login, lockoutTime;
+
+        /* Read all 7 fields (including lockoutTime) */
+        int fields = fscanf(f, "%49[^,],%49[^,],%d,%ld,%ld,%d,%d\n",
+            user.username, user.password, &role,
+            &last_login, &lockoutTime, &failed, &locked);
+
+        if (fields == 7) {
+            user.role            = (enum UserRole)role;
+            user.last_login      = (time_t)last_login;
+            user.lockoutTime     = (time_t)lockoutTime;
+            user.failed_attempts = failed;
+            user.is_locked       = locked;
+            addUser(ua, user);
+        } else {
+            printf("Warning: skipping malformed user record.\n");
+        }
+    }
+    fclose(f);
+}
+
+void saveClaimsToFile(struct ClaimArray *ca, const char *filename) {
+    FILE *f = fopen(filename, "w");
+    if (!f) { printf("Error: cannot open '%s' for writing.\n", filename); return; }
+
+    fprintf(f, "%d\n", ca->count);
+    for (int i = 0; i < ca->count; i++) {
+        if (fprintf(f, "%d,%s,%s,%d,%s,%d,%d,%ld,%ld,%s\n",
+                ca->claims[i].id,
+                ca->claims[i].username,
+                ca->claims[i].description,
+                (int)ca->claims[i].category,
+                ca->claims[i].reason,
+                (int)ca->claims[i].status,
+                (int)ca->claims[i].priority,
+                (long)ca->claims[i].submission_date,
+                (long)ca->claims[i].last_status_change,
+                ca->claims[i].resolution_note) < 0) {
+            printf("Error writing claim %d to file.\n", ca->claims[i].id);
+            fclose(f);
+            return;
+        }
+    }
+    fclose(f);
+    printf("Claims saved successfully.\n");
+}
+
+void loadClaimsFromFile(struct ClaimArray *ca, const char *filename) {
+    FILE *f = fopen(filename, "r");
+    if (!f) return;
+
+    int count;
+    if (fscanf(f, "%d\n", &count) != 1) {
+        printf("Error reading claim count from file.\n");
+        fclose(f);
+        return;
+    }
+
+    for (int i = 0; i < count; i++) {
+        struct Claim claim;
+        int  category, status, priority;
+        long submission_date, last_status_change;
+
+        int fields = fscanf(f, "%d,%49[^,],%499[^,],%d,%99[^,],%d,%d,%ld,%ld,%499[^\n]\n",
+            &claim.id,
+            claim.username,
+            claim.description,
+            &category,
+            claim.reason,
+            &status,
+            &priority,
+            &submission_date,
+            &last_status_change,
+            claim.resolution_note);
+
+        if (fields == 10) {
+            claim.category           = (enum ClaimCategory)category;
+            claim.status             = (enum ClaimStatus)status;
+            claim.priority           = (enum ClaimPriority)priority;
+            claim.submission_date    = (time_t)submission_date;
+            claim.last_status_change = (time_t)last_status_change;
+            addClaim(ca, claim);
+        } else {
+            printf("Warning: skipping malformed claim record.\n");
+        }
+    }
+    fclose(f);
+    printf("Claims loaded successfully.\n");
+}
+
+/* ============================================================
+ * AUTHENTICATION
+ * ============================================================ */
+
+/**
+ * authenticateUser — looks up username, checks lockout, validates password.
+ * Returns the user's index in ua->users on success, or -1 on failure.
+ *
+ * Lockout algorithm:
+ *   - 3 consecutive wrong passwords → account locked for LOCKOUT_SECONDS.
+ *   - On the next login attempt after the lockout period, the lock resets.
+ */
+int authenticateUser(struct UserArray *ua, const char *username, const char *password) {
+    for (int i = 0; i < ua->count; i++) {
+        if (strcmp(ua->users[i].username, username) != 0) continue;
+
+        /* Check lockout status */
+        if (ua->users[i].is_locked) {
+            double elapsed = difftime(time(NULL), ua->users[i].lockoutTime);
+            if (elapsed < LOCKOUT_SECONDS) {
+                int remaining = (int)((LOCKOUT_SECONDS - elapsed) / 60) + 1;
+                printf("Account is locked. Try again in ~%d minute(s).\n", remaining);
+                return -1;
+            }
+            /* Lockout expired — automatically reset */
+            ua->users[i].is_locked       = 0;
+            ua->users[i].failed_attempts = 0;
+        }
+
+        if (strcmp(ua->users[i].password, password) == 0) {
+            ua->users[i].failed_attempts = 0;
+            printf("Welcome, %s!\n", username);
+            return i;
+        }
+
+        /* Wrong password */
+        ua->users[i].failed_attempts++;
+        if (ua->users[i].failed_attempts >= MAX_LOGIN_ATTEMPTS) {
+            ua->users[i].lockoutTime = time(NULL);
+            ua->users[i].is_locked   = 1;
+            printf("Account locked after %d failed attempts. Try again in 30 minutes.\n",
+                   MAX_LOGIN_ATTEMPTS);
+        } else {
+            printf("Incorrect password. %d attempt(s) remaining.\n",
+                   MAX_LOGIN_ATTEMPTS - ua->users[i].failed_attempts);
+        }
+        return -1;
+    }
+    printf("User '%s' not found.\n", username);
+    return -1;
+}
+
+/** Returns 1 if the session started within SESSION_SECONDS ago. */
+int isSessionValid(time_t lastLogin) {
+    return difftime(time(NULL), lastLogin) <= SESSION_SECONDS;
+}
+
+/**
+ * registerUser — prompts for username + password and creates a CLIENT account.
+ *
+ * Password policy (enforced by isPasswordValid):
+ *   - Minimum 8 characters
+ *   - At least one uppercase letter
+ *   - At least one lowercase letter
+ *   - At least one digit
+ *   - At least one special character from: !@#$%^&*
+ *   - Must not contain the username as a substring
+ */
+int registerUser(struct UserArray *ua) {
+    struct User newUser;
+
+    printf("Enter username: ");
+    fgets(newUser.username, MAX_USERNAME_LENGTH, stdin);
+    newUser.username[strcspn(newUser.username, "\n")] = 0;
+
+    char password[MAX_PASSWORD_LENGTH];
+    do {
+        printf("Enter password: ");
+        fgets(password, MAX_PASSWORD_LENGTH, stdin);
+        password[strcspn(password, "\n")] = 0;
+        if (!isPasswordValid(password, newUser.username)) {
+            printf("Password must be >=8 chars and contain uppercase, lowercase, digit, and special char (!@#$%%^&*).\n");
+        }
+    } while (!isPasswordValid(password, newUser.username));
+
+    strcpy(newUser.password, password);
+    newUser.role            = CLIENT;
+    newUser.last_login      = time(NULL);
+    newUser.lockoutTime     = 0;
+    newUser.failed_attempts = 0;
+    newUser.is_locked       = 0;
+
+    addUser(ua, newUser);
+    return 1;
+}
+
+/** Returns 1 if the password satisfies the security policy. */
+int isPasswordValid(const char *password, const char *username) {
+    int len         = (int)strlen(password);
+    int has_upper   = 0, has_lower = 0, has_digit = 0, has_special = 0;
+
+    if (len < 8)                             return 0;
+    if (strstr(password, username) != NULL)  return 0;
+
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)password[i];
+        if      (isupper(c))              has_upper   = 1;
+        else if (islower(c))              has_lower   = 1;
+        else if (isdigit(c))              has_digit   = 1;
+        else if (strchr("!@#$%^&*", c))   has_special = 1;
+    }
+    return has_upper && has_lower && has_digit && has_special;
+}
+
+/* ============================================================
+ * DATE HELPERS
+ * ============================================================ */
+
+/** Formats a time_t as "YYYY-MM-DD HH:MM:SS" into dateStr. */
+void formatDate(time_t timestamp, char *dateStr) {
+    struct tm *tm_info = localtime(&timestamp);
+    if (tm_info == NULL) {
+        strcpy(dateStr, "N/A");
+        return;
+    }
+    strftime(dateStr, DATE_STRING_LENGTH, "%Y-%m-%d %H:%M:%S", tm_info);
+}
+
+/** Parses a "YYYY-MM-DD" string back to a time_t. */
+time_t parseDate(const char *dateStr) {
+    struct tm tm_info = {0};
+    sscanf(dateStr, "%d-%d-%d",
+           &tm_info.tm_year, &tm_info.tm_mon, &tm_info.tm_mday);
+    tm_info.tm_year -= 1900;
+    tm_info.tm_mon  -= 1;
+    return mktime(&tm_info);
+}
+
+/* ============================================================
+ * PRIORITY INFERENCE
+ *
+ * Algorithm: scan the description (case-insensitive) for trigger words.
+ *
+ *   HIGH   triggers : urgent, emergency, critical, severe
+ *   MEDIUM triggers : important, significant, moderate
+ *   LOW    (default): anything else
+ *
+ * Used by both submitClaim() and manageClaims() to keep the logic
+ * in a single place.
+ * ============================================================ */
+
+enum ClaimPriority inferPriorityFromDescription(const char *description) {
+    char *lower = my_strdup(description);
+    if (lower == NULL) return LOW;
+
+    for (int i = 0; lower[i]; i++)
+        lower[i] = (char)tolower((unsigned char)lower[i]);
+
+    enum ClaimPriority priority;
+
+    if (strstr(lower, "urgent")    || strstr(lower, "emergency") ||
+        strstr(lower, "critical")  || strstr(lower, "severe")) {
+        priority = HIGH;
+    } else if (strstr(lower, "important") || strstr(lower, "significant") ||
+               strstr(lower, "moderate")) {
+        priority = MEDIUM;
+    } else {
+        priority = LOW;
+    }
+
+    free(lower);
+    return priority;
+}
+
+/* ============================================================
+ * CLAIM SUBMISSION & DISPLAY
+ * ============================================================ */
+
+/**
+ * submitClaim — collects description, reason, and category from the user,
+ * then infers priority automatically from the description text.
+ */
+void submitClaim(struct ClaimArray *ca, const char *username) {
+    struct Claim claim;
+    claim.id                 = ca->count + 1;
+    claim.resolution_note[0] = '\0';
+    strcpy(claim.username, username);
+
+    printAsterics(30);
+    printf("Enter claim description: ");
+    fgets(claim.description, MAX_DESCRIPTION_LENGTH, stdin);
+    claim.description[strcspn(claim.description, "\n")] = 0;
+
+    printf("Enter claim reason: ");
+    fgets(claim.reason, MAX_REASON_LENGTH, stdin);
+    claim.reason[strcspn(claim.reason, "\n")] = 0;
+
+    printAsterics(30);
+    printf("Select category:\n  1. Payment\n  2. Customer Services\n  3. Technical\nChoice: ");
+    int cat;
+    if (scanf("%d", &cat) != 1 || cat < 1 || cat > 3) cat = 3;
+    getchar();
+    claim.category = (enum ClaimCategory)(cat - 1);
+
+    claim.status             = PENDING;
+    claim.submission_date    = time(NULL);
+    claim.last_status_change = claim.submission_date;
+    claim.priority           = inferPriorityFromDescription(claim.description);
+
+    addClaim(ca, claim);
+    printf("Claim #%d submitted. Auto-assigned priority: %s\n",
+           claim.id, getPriorityString(claim.priority));
+}
+
+/**
+ * compareClaims — qsort comparator: sorts HIGH → MEDIUM → LOW,
+ * breaking ties by newest submission date first.
+ */
+int compareClaims(const void *a, const void *b) {
+    const struct Claim *ca = (const struct Claim *)a;
+    const struct Claim *cb = (const struct Claim *)b;
+
+    if (ca->priority != cb->priority)
+        return (int)cb->priority - (int)ca->priority;
+
+    return (int)difftime(cb->submission_date, ca->submission_date);
+}
+
+/**
+ * displayUserClaims — shows claims sorted by priority (highest first).
+ * Admins and agents see ALL claims; clients see only their own.
+ * After display, a client may choose to modify or delete a claim.
+ */
+void displayUserClaims(struct ClaimArray *ca, const char *username, enum UserRole role) {
+    qsort(ca->claims, ca->count, sizeof(struct Claim), compareClaims);
+
+    printf("Claims List:\n");
+    printAsterics(100);
+    printf("%-5s %-18s %-12s %-10s %-22s %-20s\n",
+           "ID", "Category", "Status", "Priority", "Date", "Username");
+    printAsterics(100);
+
+    int found = 0;
+    for (int i = 0; i < ca->count; i++) {
+        /* Access control: clients see only their own claims */
+        if (role == CLIENT && strcmp(ca->claims[i].username, username) != 0) continue;
+
+        char dateStr[DATE_STRING_LENGTH];
+        formatDate(ca->claims[i].submission_date, dateStr);
+
+        printf("%-5d %-18s %-12s %-10s %-22s %-20s\n",
+            ca->claims[i].id,
+            getCategoryString(ca->claims[i].category),
+            getStatusString(ca->claims[i].status),
+            getPriorityString(ca->claims[i].priority),
+            dateStr,
+            ca->claims[i].username);
+        printf("  Description : %s\n", ca->claims[i].description);
+        printf("  Reason      : %s\n", ca->claims[i].reason);
+
+        if (ca->claims[i].status != PENDING &&
+            strlen(ca->claims[i].resolution_note) > 0) {
+            printf("  Resolution  : %s\n", ca->claims[i].resolution_note);
+        }
+        printAsterics(100);
+        printf("\n");
+        found = 1;
+    }
+
+    if (!found) printf("No claims to display.\n");
+
+    /* Clients can modify/delete their claims (within 24 hours) */
     if (role == CLIENT) {
-        int choice, claim_id;
-        printf("Enter claim ID to modify/delete (0 to exit): ");
-        scanf("%d", &claim_id);
-        getchar(); // Consume newline
-
-        if (claim_id != 0) {
-            manageClaims(claimArray, username, role, claim_id);
+        int claim_id;
+        printf("Enter claim ID to modify/delete (0 to go back): ");
+        if (scanf("%d", &claim_id) == 1 && claim_id != 0) {
+            getchar();
+            manageClaims(ca, username, role, claim_id);
+        } else {
+            getchar();
         }
     }
 }
 
-void displayClaimsByPriority(struct ClaimArray* claimArray, const char* username, enum UserRole role) {
-	// Sort the claims array by priority
-	qsort(claimArray->claims, claimArray->count, sizeof(struct Claim), compareClaims);
-	char dateStr[DATE_STRING_LENGTH];
-	if (role == ADMIN || role == CLAIM_AGENT) {
-		printf("All claims (sorted by priority):\n");
-		for (int i = 0; i < claimArray->count; i++) {
-		    formatDate(claimArray->claims[i].submission_date, dateStr);
-			printf("ID: %d, Username: %s, Category: %s, Status: %s, Priority: %s, Submission Date: %s\n",
-				claimArray->claims[i].id,
-				claimArray->claims[i].username,
-				getCategoryString(claimArray->claims[i].category),
-				getStatusString(claimArray->claims[i].status),
-				getPriorityString(claimArray->claims[i].priority),dateStr);
-			printf("Description: %s\n", claimArray->claims[i].description);
-			printf("Reason: %s\n\n", claimArray->claims[i].reason);
-		}
-	} else {
-		printf("Your claims:\n");
-		for (int i = 0; i < claimArray->count; i++) {
-			if (strcmp(claimArray->claims[i].username, username) == 0) {
-				printf("ID: %d, Category: %s, Status: %s, Priority: %s\n",
-					claimArray->claims[i].id,
-					getCategoryString(claimArray->claims[i].category),
-					getStatusString(claimArray->claims[i].status),
-					getPriorityString(claimArray->claims[i].priority));
-				printf("Description: %s\n", claimArray->claims[i].description);
-				printf("Reason: %s\n\n", claimArray->claims[i].reason);
-			}
-		}
-	}
-}
+/* ============================================================
+ * SEARCH
+ * ============================================================ */
 
+/**
+ * searchClaims — filters claims by a chosen field and search term.
+ * Available only to ADMIN and CLAIM_AGENT (enforced in main).
+ */
+void searchClaims(struct ClaimArray *ca, enum UserRole role) {
+    (void)role; /* access control already enforced by caller */
 
-// check if a user is authorized to view a claim (all users can see are their claims but Admin/Agent can see everything)
-int isAuthorizedToViewClaim(const struct Claim* claim, const char* username, enum UserRole role) {
-	return (role == ADMIN || role == CLAIM_AGENT || strcmp(claim->username, username) == 0);
-}
+    if (ca->count == 0) { printf("No claims to search.\n"); return; }
 
-
-void searchClaims(struct ClaimArray* claimArray, enum UserRole role) {
     int choice;
-    char dateStr[DATE_STRING_LENGTH];
-    printf("Search by:\n1. ID\n2. Username\n3. Category\n4. Status\n5. Priority\n");
-    printf("6. Submission Date\nChoice: ");
-    scanf("%d", &choice);
-    getchar(); // Consume newline
+    printf("Search by:\n"
+           "  1. ID\n  2. Username\n  3. Category\n"
+           "  4. Status\n  5. Priority\n  6. Submission Date\n"
+           "Choice: ");
+    if (scanf("%d", &choice) != 1 || choice < 1 || choice > 6) {
+        getchar();
+        printf("Invalid search option.\n");
+        return;
+    }
+    getchar();
 
     char searchTerm[MAX_DESCRIPTION_LENGTH];
     printf("Enter search term: ");
     fgets(searchTerm, MAX_DESCRIPTION_LENGTH, stdin);
-    searchTerm[strcspn(searchTerm, "\n")] = 0; // Remove trailing newline
+    searchTerm[strcspn(searchTerm, "\n")] = 0;
 
-    int len = strlen(searchTerm);
+    if (strlen(searchTerm) == 0) { printf("Please enter a search term.\n"); return; }
 
-    // Check for empty search term
-    if (len == 0) {
-        printf("Please enter a search term.\n");
-        return;
-    }
-
-    // Check for invalid search category
-    if (choice < 1 || choice > 6) {
-        printf("Invalid search category.\n");
-        return;
-    }
-
-    // Check for empty claim array
-    if (claimArray->count == 0) {
-        printf("No claims to search.\n");
-        return;
-    }
+    int    found   = 0;
+    char   dateStr[DATE_STRING_LENGTH];
 
     printf("Search results:\n");
-	for (int i = 0; i < claimArray->count; i++) {
-    int match = 0;
+    printAsterics(100);
 
-    switch (choice) {
-        case 1: // ID
-            if (claimArray->claims[i].id == atoi(searchTerm)) match = 1;
-            break;
-        case 2: // Username
-            if (strcasecmp(claimArray->claims[i].username, searchTerm) == 0) match = 1;
-            break;
-        case 3: // Category
-            if (strcasecmp(getCategoryString(claimArray->claims[i].category), searchTerm) == 0) match = 1;
-            break;
-        case 4: // Status
-            if ((strcasecmp(searchTerm, "pending") == 0 && claimArray->claims[i].status == PENDING) ||
-                (strcasecmp(searchTerm, "in progress") == 0 && claimArray->claims[i].status == IN_PROGRESS) ||
-                (strcasecmp(searchTerm, "resolved") == 0 && claimArray->claims[i].status == RESOLVED) ||
-                (strcasecmp(searchTerm, "rejected") == 0 && claimArray->claims[i].status == REJECTED)) {
-                    match = 1;
-            }
-            break;
-        case 5: // Priority
-            if ((strcasecmp(searchTerm, "high") == 0 && claimArray->claims[i].priority == HIGH) ||
-                (strcasecmp(searchTerm, "medium") == 0 && claimArray->claims[i].priority == MEDIUM) ||
-                (strcasecmp(searchTerm, "low") == 0 && claimArray->claims[i].priority == LOW)) {
-                    match = 1;
-            }
-            break;
-        case 6: // Submission Date
-            formatDate(claimArray->claims[i].submission_date, dateStr);
-            if (strstr(dateStr, searchTerm) != NULL) match = 1;
-            break;
-    }
+    for (int i = 0; i < ca->count; i++) {
+        int match = 0;
 
-    if (match && (role == ADMIN || role == CLAIM_AGENT || 
-        strcasecmp(claimArray->claims[i].username, searchTerm) == 0)) {
-        char dateStr[DATE_STRING_LENGTH];
-        formatDate(claimArray->claims[i].submission_date, dateStr);
-        printf("ID: %d, Username: %s, Category: %s, Status: %s, Priority: %s, Submission Date: %s\n",
-        claimArray->claims[i].id, claimArray->claims[i].username, getCategoryString(claimArray->claims[i].category),
-        getStatusString(claimArray->claims[i].status), getPriorityString(claimArray->claims[i].priority), dateStr);
-    }
-}
-}
+        switch (choice) {
+            case 1: match = (ca->claims[i].id == atoi(searchTerm)); break;
+            case 2: match = (my_strcasecmp(ca->claims[i].username, searchTerm) == 0); break;
+            case 3: match = (my_strcasecmp(getCategoryString(ca->claims[i].category), searchTerm) == 0); break;
+            case 4:
+                match = ((my_strcasecmp(searchTerm, "pending")     == 0 && ca->claims[i].status == PENDING)     ||
+                         (my_strcasecmp(searchTerm, "in progress")  == 0 && ca->claims[i].status == IN_PROGRESS) ||
+                         (my_strcasecmp(searchTerm, "resolved")     == 0 && ca->claims[i].status == RESOLVED)    ||
+                         (my_strcasecmp(searchTerm, "rejected")     == 0 && ca->claims[i].status == REJECTED));
+                break;
+            case 5:
+                match = ((my_strcasecmp(searchTerm, "high")   == 0 && ca->claims[i].priority == HIGH)   ||
+                         (my_strcasecmp(searchTerm, "medium")  == 0 && ca->claims[i].priority == MEDIUM) ||
+                         (my_strcasecmp(searchTerm, "low")     == 0 && ca->claims[i].priority == LOW));
+                break;
+            case 6:
+                formatDate(ca->claims[i].submission_date, dateStr);
+                match = (strstr(dateStr, searchTerm) != NULL);
+                break;
+        }
 
-void generateStatistics(struct ClaimArray* claimArray, char* filename) {
-    
-
-    // Initialize variables
-    int totalClaims = claimArray->count;
-
-    int priorityCounts[4] = {0}; // Initialize priority counts to 0
-    int statusCounts[3] = {0}; // Initialize status counts to 0
-    int categoryCounts[5] = {0}; // Initialize category counts to 0
-
-    double priorityProcessingTimes[4] = {0}; // Initialize priority processing times to 0
-    int priorityClaimCounts[4] = {0}; // Initialize priority claim counts to 0
-
-    double statusProcessingTimes[3] = {0}; // Initialize status processing times to 0
-    int statusClaimCounts[3] = {0}; // Initialize status claim counts to 0
-
-    // Calculate statistics
-    for (int i = 0; i < claimArray->count; i++) {
-        // Update priority counts
-        priorityCounts[claimArray->claims[i].priority - 1]++;
-
-        // Update status counts
-        statusCounts[claimArray->claims[i].status - 1]++;
-
-        // Update category counts
-        categoryCounts[claimArray->claims[i].category - 1]++;
-
-        // Calculate processing time for each priority and status
-        time_t submission_date = claimArray->claims[i].submission_date;
-        time_t last_status_change = claimArray->claims[i].last_status_change;
-        double processing_time = difftime(last_status_change, submission_date) / 60; // Convert to minutes
-
-        priorityProcessingTimes[claimArray->claims[i].priority - 1] += processing_time;
-        priorityClaimCounts[claimArray->claims[i].priority - 1]++;
-
-        statusProcessingTimes[claimArray->claims[i].status - 1] += processing_time;
-        statusClaimCounts[claimArray->claims[i].status - 1]++;
-    }
-
-	printf( "Total Claims: %d\n", totalClaims);
-
-    printf( "**********************************\n");
-    printf( "Priority Metrics:\n");
-    printf( "**********************************\n");
-    for (int i = 0; i < 4; i++) {
-        double percentage = (double)priorityCounts[i] / totalClaims * 100;
-        printf( "Priority %s: %d (%.2f%%)\n", getPriorityString(i + 1), priorityCounts[i], percentage);
-    }
-    printf( "**********************************\n");
-    printf( "Status Metrics:\n");
-    printf( "**********************************\n");
-    for (int i = 0; i < 3; i++) {
-        double percentage = (double)statusCounts[i] / totalClaims * 100;
-        printf( "Status %s: %d (%.2f%%)\n", getStatusString(i + 1), statusCounts[i], percentage);
-    }
-
-    printf( "**********************************\n");
-    printf( "Category Metrics:\n");
-    printf( "**********************************\n");
-    for (int i = 0; i < 5; i++) {
-        double percentage = (double)categoryCounts[i] / totalClaims * 100;
-        printf( "Category %s: %d (%.2f%%)\n", getCategoryString(i + 1), categoryCounts[i], percentage);
-    }
-
-    printf( "**********************************\n");
-    printf( "Average Processing Time by Priority:\n");
-    printf( "**********************************\n");
-    for (int i = 0; i < 4; i++) {
-        double average_processing_time = priorityProcessingTimes[i] / priorityClaimCounts[i];
-        printf( "Priority %s: %.2f minutes\n", getPriorityString(i + 1), average_processing_time);
-    }
-    printf( "**********************************\n");
-    printf( "Average Processing Time by Status:\n");
-    printf( "**********************************\n");
-    for (int i = 0; i < 3; i++) {
-        double average_processing_time = statusProcessingTimes[i] / statusClaimCounts[i];
-        printf( "Status %s: %.2f minutes\n", getStatusString(i + 1), average_processing_time);
-    }
-
-    
-}
-
-
-void manageClaims(struct ClaimArray* claimArray, const char* username, enum UserRole role, int claim_id) {
-    int choice;
-    
-    for (int i = 0; i < claimArray->count; i++) {
-        if (claimArray->claims[i].id == claim_id) {
-            // Check if the user is authorized to modify this claim
-            if (role == CLIENT && strcmp(claimArray->claims[i].username, username) != 0) {
-                printf("You are not authorized to modify this claim.\n");
-                return;
-            }
-            
-            // Check if 24 hours have passed for client modifications
-            if (role == CLIENT && !isWithin24Hours(claimArray->claims[i].submission_date)) {
-                printf("You can no longer modify or delete this claim as 24 hours have passed since submission.\n");
-                return;
-            }
-            
-            printf("Current status: %s\n", getStatusString(claimArray->claims[i].status));
-            printf("Current priority: %s\n", getPriorityString(claimArray->claims[i].priority));
-            
-            if (role == CLIENT) {
-                printf("1. Edit Description\n2. Delete claim\n");
-            } else {
-                printf("1. Edit Description\n2. Mark as In Progress\n3. Mark as Resolved\n4. Mark as Rejected\n5. Delete claim\n");
-            }
-            printf("Choice: ");
-            scanf("%d", &choice);
-            getchar(); // Consume newline
-            
-			char *description_lower = strdup(claimArray->claims[i].description);
-            switch (choice) {
-                case 1:
-                    printf("Enter new description: ");
-                    fgets(claimArray->claims[i].description, MAX_DESCRIPTION_LENGTH, stdin);
-                    claimArray->claims[i].description[strcspn(claimArray->claims[i].description, "\n")] = 0;
-                    
-					for (int j = 0; description_lower[j]; j++) {
-						description_lower[j] = tolower(description_lower[j]);
-					}
-					
-					if (strstr(description_lower, "urgent") || strstr(description_lower, "emergency") || 
-						strstr(description_lower, "critical") || strstr(description_lower, "severe")) {
-							claimArray->claims[i].priority = HIGH;
-						} else if (strstr(description_lower, "important") || strstr(description_lower, "significant") || 
-							strstr(description_lower, "moderate")) {
-								claimArray->claims[i].priority = MEDIUM;
-							} else {
-								claimArray->claims[i].priority = LOW;
-							}
-					
-					free(description_lower);
-					printf("Description updated. New priority: %s\n", 
-						claimArray->claims[i].priority == HIGH ? "High" : 
-						(claimArray->claims[i].priority == MEDIUM ? "Medium" : "Low"));
-					break;
-                case 2:
-                    if (role == CLIENT) {
-						for (int j = i; j < claimArray->count - 1; j++) {
-                            claimArray->claims[j] = claimArray->claims[j + 1];
-                        }
-                        claimArray->count--;
-                        printf("Claim deleted successfully.\n");
-                        return;                    
-					} else {
-                        claimArray->claims[i].status = IN_PROGRESS;
-                        claimArray->claims[i].last_status_change = time(NULL);
-                        printf("Enter resolution note: ");
-                        fgets(claimArray->claims[i].resolution_note, MAX_DESCRIPTION_LENGTH, stdin);
-                        claimArray->claims[i].resolution_note[strcspn(claimArray->claims[i].resolution_note, "\n")] = 0;
-                        printf("Claim status updated to In Progress.\n");
-                    }
-                    break;
-                case 3:
-                    if (role != CLIENT) {
-                        claimArray->claims[i].status = RESOLVED;
-                        claimArray->claims[i].last_status_change = time(NULL);
-                        printf("Enter resolution note: ");
-                        fgets(claimArray->claims[i].resolution_note, MAX_DESCRIPTION_LENGTH, stdin);
-                        claimArray->claims[i].resolution_note[strcspn(claimArray->claims[i].resolution_note, "\n")] = 0;
-                        printf("Claim status updated to Resolved.\n");
-                    }
-                    break;
-                case 4:
-                    if (role != CLIENT) {
-                        claimArray->claims[i].status = REJECTED;
-                        claimArray->claims[i].last_status_change = time(NULL);
-                        printf("Enter resolution note: ");
-                        fgets(claimArray->claims[i].resolution_note, MAX_DESCRIPTION_LENGTH, stdin);
-                        claimArray->claims[i].resolution_note[strcspn(claimArray->claims[i].resolution_note, "\n")] = 0;
-                        printf("Claim status updated to Rejected.\n");
-                    }
-                    break;
-				case 5:
-					if (role == ADMIN || (role == CLIENT && isWithin24Hours(claimArray->claims[i].submission_date))) {
-						// Move all claims after this one back by one position
-						for (int j = i; j < claimArray->count - 1; j++) {
-							claimArray->claims[j] = claimArray->claims[j + 1];
-						}
-						claimArray->count--;
-						printf("Claim deleted successfully.\n");
-					} else {
-						printf("You are not authorized to delete this claim.\n");
-					}
-					return;
-				default:
-					printf("Invalid choice.\n");
-					return;
-            }
-            printf("Claim updated successfully.\n");
-            return;
+        if (match) {
+            found = 1;
+            formatDate(ca->claims[i].submission_date, dateStr);
+            printf("ID: %-4d | User: %-15s | Cat: %-18s | Status: %-12s | Priority: %-8s | %s\n",
+                ca->claims[i].id,
+                ca->claims[i].username,
+                getCategoryString(ca->claims[i].category),
+                getStatusString(ca->claims[i].status),
+                getPriorityString(ca->claims[i].priority),
+                dateStr);
+            printf("  Description: %s\n", ca->claims[i].description);
+            printAsterics(100);
         }
     }
-    printf("Claim not found.\n");
+
+    if (!found) printf("No matching claims found.\n");
 }
 
+/* ============================================================
+ * CLAIM MANAGEMENT
+ * ============================================================ */
 
-void manageUsers(struct UserArray* userArray) {
-	char username[MAX_USERNAME_LENGTH];
-	int choice;
-	
-	printf("Enter username to manage: ");
-	fgets(username, MAX_USERNAME_LENGTH, stdin);
-	username[strcspn(username, "\n")] = 0;
-	
-	for (int i = 0; i < userArray->count; i++) {
-		if (strcmp(userArray->users[i].username, username) == 0) {
-			printf("Current role: %s\n", 
-				userArray->users[i].role == ADMIN ? "Admin" :
-				(userArray->users[i].role == CLAIM_AGENT ? "Claim Agent" : "Client"));
-			
-			printf("1. Change to Admin\n2. Change to Claim Agent\n3. Change to Client\n4. Delete user\nChoice: ");
-			scanf("%d", &choice);
-			getchar(); // Consume newline
-			
-			switch (choice) {
-				case 1:
-					userArray->users[i].role = ADMIN;
-					break;
-				case 2:
-					userArray->users[i].role = CLAIM_AGENT;
-					break;
-				case 3:
-					userArray->users[i].role = CLIENT;
-					break;
-				case 4:
-					// Move all users after this one back by one position
-					for (int j = i; j < userArray->count - 1; j++) {
-						userArray->users[j] = userArray->users[j + 1];
-					}
-					userArray->count--;
-					printf("User deleted successfully.\n");
-					return;
-				default:
-					printf("Invalid choice.\n");
-					return;
-			}
-			printf("User role updated successfully.\n");
-			return;
-		}
-	}
-	printf("User not found.\n");
+/**
+ * manageClaims — allows authorised users to modify or delete a claim.
+ *
+ * Permissions:
+ *   CLIENT     : edit description or delete — only within 24 hours, only own claims
+ *   CLAIM_AGENT: change status (In Progress / Resolved / Rejected), edit description
+ *   ADMIN      : all of the above plus force-delete any claim
+ *
+ * Priority is automatically re-inferred after a description edit.
+ */
+void manageClaims(struct ClaimArray *ca, const char *username, enum UserRole role, int claim_id) {
+    for (int i = 0; i < ca->count; i++) {
+        if (ca->claims[i].id != claim_id) continue;
+
+        /* Authorisation */
+        if (role == CLIENT && strcmp(ca->claims[i].username, username) != 0) {
+            printf("You are not authorised to modify this claim.\n");
+            return;
+        }
+        if (role == CLIENT && !isWithin24Hours(ca->claims[i].submission_date)) {
+            printf("You can no longer modify this claim (24-hour window has passed).\n");
+            return;
+        }
+
+        printf("Status   : %s\n", getStatusString(ca->claims[i].status));
+        printf("Priority : %s\n", getPriorityString(ca->claims[i].priority));
+
+        int choice;
+        if (role == CLIENT) {
+            printf("1. Edit Description\n2. Delete Claim\nChoice: ");
+        } else {
+            printf("1. Edit Description\n"
+                   "2. Mark as In Progress\n"
+                   "3. Mark as Resolved\n"
+                   "4. Mark as Rejected\n"
+                   "5. Delete Claim\n"
+                   "Choice: ");
+        }
+        if (scanf("%d", &choice) != 1) { getchar(); return; }
+        getchar();
+
+        switch (choice) {
+            case 1:
+                printf("Enter new description: ");
+                fgets(ca->claims[i].description, MAX_DESCRIPTION_LENGTH, stdin);
+                ca->claims[i].description[strcspn(ca->claims[i].description, "\n")] = 0;
+                /* Re-infer priority from updated description */
+                ca->claims[i].priority = inferPriorityFromDescription(ca->claims[i].description);
+                printf("Description updated. New priority: %s\n",
+                       getPriorityString(ca->claims[i].priority));
+                break;
+
+            case 2:
+                if (role == CLIENT) {
+                    /* Client delete: shift array left */
+                    for (int j = i; j < ca->count - 1; j++)
+                        ca->claims[j] = ca->claims[j + 1];
+                    ca->count--;
+                    printf("Claim deleted successfully.\n");
+                    return;
+                }
+                /* Agent/Admin: mark In Progress */
+                ca->claims[i].status             = IN_PROGRESS;
+                ca->claims[i].last_status_change = time(NULL);
+                printf("Enter resolution note: ");
+                fgets(ca->claims[i].resolution_note, MAX_DESCRIPTION_LENGTH, stdin);
+                ca->claims[i].resolution_note[strcspn(ca->claims[i].resolution_note, "\n")] = 0;
+                printf("Status updated to In Progress.\n");
+                break;
+
+            case 3:
+                if (role == CLIENT) { printf("Access denied.\n"); return; }
+                ca->claims[i].status             = RESOLVED;
+                ca->claims[i].last_status_change = time(NULL);
+                printf("Enter resolution note: ");
+                fgets(ca->claims[i].resolution_note, MAX_DESCRIPTION_LENGTH, stdin);
+                ca->claims[i].resolution_note[strcspn(ca->claims[i].resolution_note, "\n")] = 0;
+                printf("Status updated to Resolved.\n");
+                break;
+
+            case 4:
+                if (role == CLIENT) { printf("Access denied.\n"); return; }
+                ca->claims[i].status             = REJECTED;
+                ca->claims[i].last_status_change = time(NULL);
+                printf("Enter resolution note: ");
+                fgets(ca->claims[i].resolution_note, MAX_DESCRIPTION_LENGTH, stdin);
+                ca->claims[i].resolution_note[strcspn(ca->claims[i].resolution_note, "\n")] = 0;
+                printf("Status updated to Rejected.\n");
+                break;
+
+            case 5:
+                if (role != ADMIN) { printf("Only admins can force-delete a claim.\n"); return; }
+                for (int j = i; j < ca->count - 1; j++)
+                    ca->claims[j] = ca->claims[j + 1];
+                ca->count--;
+                printf("Claim deleted successfully.\n");
+                return;
+
+            default:
+                printf("Invalid choice.\n");
+                return;
+        }
+        printf("Claim updated successfully.\n");
+        return;
+    }
+    printf("Claim #%d not found.\n", claim_id);
 }
 
+/* ============================================================
+ * USER MANAGEMENT  (Admin only)
+ * ============================================================ */
 
-const char* getCategoryString(enum ClaimCategory category) {
-	switch(category) {
-		
-		case PAYMENT: return "payment";
-		case CUSTOMER_SERVICES: return "customer service";
-		case TECHNICAL: return "technical";
-		default: return "Unknown";
-	}
+/**
+ * manageUsers — allows the admin to change a user's role or delete them.
+ */
+void manageUsers(struct UserArray *ua) {
+    char username[MAX_USERNAME_LENGTH];
+    printf("Enter username to manage: ");
+    fgets(username, MAX_USERNAME_LENGTH, stdin);
+    username[strcspn(username, "\n")] = 0;
+
+    for (int i = 0; i < ua->count; i++) {
+        if (strcmp(ua->users[i].username, username) != 0) continue;
+
+        const char *roleStr =
+            ua->users[i].role == ADMIN       ? "Admin" :
+            ua->users[i].role == CLAIM_AGENT ? "Claim Agent" : "Client";
+        printf("Current role: %s\n", roleStr);
+        printf("1. Change to Admin\n2. Change to Claim Agent\n3. Change to Client\n4. Delete User\nChoice: ");
+
+        int choice;
+        if (scanf("%d", &choice) != 1) { getchar(); return; }
+        getchar();
+
+        switch (choice) {
+            case 1: ua->users[i].role = ADMIN;       break;
+            case 2: ua->users[i].role = CLAIM_AGENT; break;
+            case 3: ua->users[i].role = CLIENT;      break;
+            case 4:
+                for (int j = i; j < ua->count - 1; j++)
+                    ua->users[j] = ua->users[j + 1];
+                ua->count--;
+                printf("User '%s' deleted.\n", username);
+                return;
+            default:
+                printf("Invalid choice.\n");
+                return;
+        }
+        printf("Role updated successfully.\n");
+        return;
+    }
+    printf("User '%s' not found.\n", username);
 }
 
-const char* getStatusString(enum ClaimStatus status) {
-	switch(status) {
-		case PENDING: return "Pending";
-		case IN_PROGRESS: return "In Progress";
-		case RESOLVED: return "Resolved";
-		case REJECTED: return "Rejected";
-		default: return "Unknown";
-	}
+/* ============================================================
+ * STATISTICS & REPORTS  (Admin only)
+ * ============================================================ */
+
+/**
+ * generateStatistics — prints a summary to the console and saves it to filename.
+ *
+ * Uses enum values directly as array indices (no off-by-one arithmetic):
+ *   priorityCounts[LOW=0], [MEDIUM=1], [HIGH=2]
+ *   statusCounts[PENDING=0], [IN_PROGRESS=1], [RESOLVED=2], [REJECTED=3]
+ *   categoryCounts[PAYMENT=0], [CUSTOMER_SERVICES=1], [TECHNICAL=2]
+ */
+void generateStatistics(struct ClaimArray *ca, const char *filename) {
+    if (ca->count == 0) {
+        printf("No claims available to generate statistics.\n");
+        return;
+    }
+
+    int total = ca->count;
+
+    int priorityCounts[3]  = {0};   /* LOW, MEDIUM, HIGH */
+    int statusCounts[4]    = {0};   /* PENDING, IN_PROGRESS, RESOLVED, REJECTED */
+    int categoryCounts[3]  = {0};   /* PAYMENT, CUSTOMER_SERVICES, TECHNICAL */
+
+    for (int i = 0; i < ca->count; i++) {
+        priorityCounts[(int)ca->claims[i].priority]++;
+        statusCounts[(int)ca->claims[i].status]++;
+        categoryCounts[(int)ca->claims[i].category]++;
+    }
+
+    const enum ClaimPriority  priorities[]  = {LOW, MEDIUM, HIGH};
+    const enum ClaimStatus    statuses[]    = {PENDING, IN_PROGRESS, RESOLVED, REJECTED};
+    const enum ClaimCategory  categories[]  = {PAYMENT, CUSTOMER_SERVICES, TECHNICAL};
+
+    /* ---- Console output ---- */
+    printf("===== STATISTICS =====\nTotal Claims: %d\n\n", total);
+
+    printf("--- Priority ---\n");
+    for (int i = 0; i < 3; i++) {
+        double pct = (double)priorityCounts[i] / total * 100.0;
+        printf("  %-8s: %d (%.1f%%)\n", getPriorityString(priorities[i]), priorityCounts[i], pct);
+    }
+
+    printf("\n--- Status ---\n");
+    for (int i = 0; i < 4; i++) {
+        double pct = (double)statusCounts[i] / total * 100.0;
+        printf("  %-12s: %d (%.1f%%)\n", getStatusString(statuses[i]), statusCounts[i], pct);
+    }
+
+    printf("\n--- Category ---\n");
+    for (int i = 0; i < 3; i++) {
+        double pct = (double)categoryCounts[i] / total * 100.0;
+        printf("  %-18s: %d (%.1f%%)\n", getCategoryString(categories[i]), categoryCounts[i], pct);
+    }
+
+    /* ---- File output ---- */
+    FILE *f = fopen(filename, "w");
+    if (!f) { printf("Warning: could not save statistics to file.\n"); return; }
+
+    char dateStr[DATE_STRING_LENGTH];
+    formatDate(time(NULL), dateStr);
+    fprintf(f, "Statistics Report — %s\nTotal Claims: %d\n\n", dateStr, total);
+
+    fprintf(f, "--- Priority ---\n");
+    for (int i = 0; i < 3; i++) {
+        double pct = (double)priorityCounts[i] / total * 100.0;
+        fprintf(f, "  %-8s: %d (%.1f%%)\n", getPriorityString(priorities[i]), priorityCounts[i], pct);
+    }
+    fprintf(f, "\n--- Status ---\n");
+    for (int i = 0; i < 4; i++) {
+        double pct = (double)statusCounts[i] / total * 100.0;
+        fprintf(f, "  %-12s: %d (%.1f%%)\n", getStatusString(statuses[i]), statusCounts[i], pct);
+    }
+    fprintf(f, "\n--- Category ---\n");
+    for (int i = 0; i < 3; i++) {
+        double pct = (double)categoryCounts[i] / total * 100.0;
+        fprintf(f, "  %-18s: %d (%.1f%%)\n", getCategoryString(categories[i]), categoryCounts[i], pct);
+    }
+
+    fclose(f);
+    printf("Statistics saved to '%s'.\n", filename);
 }
 
-const char* getPriorityString(enum ClaimPriority priority) {
-	return priority == HIGH ? "High" : (priority == MEDIUM ? "Medium" : "Low");
+/**
+ * generateDailyReport — writes today's new and resolved claims to a file.
+ */
+void generateDailyReport(struct ClaimArray *ca, const char *filename) {
+    time_t now   = time(NULL);
+    struct tm *t = localtime(&now);
+
+    FILE *f = fopen(filename, "w");
+    if (!f) { printf("Error opening report file.\n"); return; }
+
+    fprintf(f, "Daily Report — %04d-%02d-%02d\n\n",
+        t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+
+    fprintf(f, "New Claims (submitted today):\n");
+    fprintf(f, "______________________________\n");
+    for (int i = 0; i < ca->count; i++) {
+        struct tm *sub = localtime(&ca->claims[i].submission_date);
+        if (sub->tm_mday == t->tm_mday &&
+            sub->tm_mon  == t->tm_mon  &&
+            sub->tm_year == t->tm_year) {
+            char ds[DATE_STRING_LENGTH];
+            strftime(ds, DATE_STRING_LENGTH, "%Y-%m-%d %H:%M:%S", sub);
+            fprintf(f, "  #%-4d | %-15s | %-18s | %-8s | %s\n",
+                ca->claims[i].id,
+                ca->claims[i].username,
+                getCategoryString(ca->claims[i].category),
+                getPriorityString(ca->claims[i].priority),
+                ds);
+        }
+    }
+
+    fprintf(f, "\nResolved Claims (today):\n");
+    fprintf(f, "________________________\n");
+    for (int i = 0; i < ca->count; i++) {
+        if (ca->claims[i].status != RESOLVED) continue;
+        struct tm *chg = localtime(&ca->claims[i].last_status_change);
+        if (chg->tm_mday == t->tm_mday &&
+            chg->tm_mon  == t->tm_mon  &&
+            chg->tm_year == t->tm_year) {
+            char ds[DATE_STRING_LENGTH];
+            strftime(ds, DATE_STRING_LENGTH, "%Y-%m-%d %H:%M:%S", chg);
+            fprintf(f, "  #%-4d | %-15s | %-18s | %-8s | resolved: %s\n",
+                ca->claims[i].id,
+                ca->claims[i].username,
+                getCategoryString(ca->claims[i].category),
+                getPriorityString(ca->claims[i].priority),
+                ds);
+        }
+    }
+
+    fclose(f);
+    printf("Daily report saved to '%s'.\n", filename);
 }
 
+/* ============================================================
+ * ENUM → STRING HELPERS
+ * ============================================================ */
 
+const char *getCategoryString(enum ClaimCategory category) {
+    switch (category) {
+        case PAYMENT:           return "Payment";
+        case CUSTOMER_SERVICES: return "Customer Service";
+        case TECHNICAL:         return "Technical";
+        default:                return "Unknown";
+    }
+}
+
+const char *getStatusString(enum ClaimStatus status) {
+    switch (status) {
+        case PENDING:     return "Pending";
+        case IN_PROGRESS: return "In Progress";
+        case RESOLVED:    return "Resolved";
+        case REJECTED:    return "Rejected";
+        default:          return "Unknown";
+    }
+}
+
+const char *getPriorityString(enum ClaimPriority priority) {
+    switch (priority) {
+        case HIGH:   return "High";
+        case MEDIUM: return "Medium";
+        case LOW:    return "Low";
+        default:     return "Unknown";
+    }
+}
+
+/* ============================================================
+ * UTILITY
+ * ============================================================ */
+
+/** Returns 1 if submissionTime is within the last 24 hours. */
 int isWithin24Hours(time_t submissionTime) {
-	time_t currentTime = time(NULL);
-	double diff = difftime(currentTime, submissionTime);
-	return diff <= (24 * 60 * 60); // 24 hours in seconds
+    return difftime(time(NULL), submissionTime) <= (24.0 * 60.0 * 60.0);
 }
 
 void printLine(int num) {
-    for (int i=0; i<num; i++)
-		printf("_");
-	printf("\n");
+    for (int i = 0; i < num; i++) putchar('_');
+    putchar('\n');
 }
 
 void printSlashes(int num) {
-    for (int i=0; i<num; i++)
-		printf("/");
-	printf("\n");
+    for (int i = 0; i < num; i++) putchar('/');
+    putchar('\n');
 }
 
 void printAsterics(int num) {
-    for (int i=0; i<num; i++)
-		printf("*");
-	printf("\n");
+    for (int i = 0; i < num; i++) putchar('*');
+    putchar('\n');
 }
 
 void padding(int num) {
-    for (int i=0; i<num; i++)
-		printf("\n");
+    for (int i = 0; i < num; i++) putchar('\n');
 }
-
-char* strcasestr_custom(const char* haystack, const char* needle) {
-    if (!*needle) {
-        return (char*)haystack;
-    }
-    
-    for (; *haystack; haystack++) {
-        if (tolower((unsigned char)*haystack) == tolower((unsigned char)*needle)) {
-            const char* h = haystack;
-            const char* n = needle;
-            while (*h && *n && tolower((unsigned char)*h) == tolower((unsigned char)*n)) {
-                h++;
-                n++;
-            }
-            if (!*n) {
-                return (char*)haystack;
-            }
-        }
-    }
-    return NULL;
-}
-
-
-void printTableHeader() {
-    printf("+-----+--------------------------+-----------------+---------------+--------------+-----------------+\n");
-    printf("| ID  | Category                 | Status          | Priority      | Username     | Date            |\n");
-    printf("+-----+--------------------------+-----------------+---------------+--------------+-----------------+\n");
-}
-
-void printTableRow(int id, const char* category, const char* status, const char* priority, const char* username, const char* date) {
-    printf("| %-7d | %-14s | %-15s | %-13s | %-12s | %-10s |\n", 
-           id, category, status, priority, username, date);
-}
-
-void printTableFooter() {
-    printf("+---------+----------------+-----------------+---------------+--------------+------------+\n");
-}
-
-void generateDailyReport(struct ClaimArray* claimArray, const char* filename) {
-    time_t currentTime = time(NULL);
-    struct tm* currentTm = localtime(&currentTime);
-    int currentDay = currentTm->tm_mday;
-    int currentMonth = currentTm->tm_mon + 1; // Months are 0-based in C
-    int currentYear = currentTm->tm_year + 1900; // Years are since 1900 in C
-
-    FILE* reportFile = fopen(filename, "w");
-    if (reportFile == NULL) {
-        printf("Error opening report file for writing.\n");
-        return;
-    }
-
-    fprintf(reportFile, "Daily Report for %d-%d-%d\n\n", currentYear, currentMonth, currentDay);
-
-    fprintf(reportFile, "New Complaints:\n");
-    fprintf(reportFile, "_________________\n");
-    for (int i = 0; i < claimArray->count; i++) {
-        struct tm* submissionTm = localtime(&claimArray->claims[i].submission_date);
-        char submission_date_str[20];
-        strftime(submission_date_str, 20, "%Y-%m-%d %H:%M:%S", submissionTm);
-        if (submissionTm->tm_mday == currentDay && submissionTm->tm_mon == currentMonth - 1 && submissionTm->tm_year == currentYear - 1900) {
-            fprintf(reportFile, "ID: %d, Username: %s, Category: %s, Priority: %s [%s]\n",
-                    claimArray->claims[i].id,
-                    claimArray->claims[i].username,
-                    getCategoryString(claimArray->claims[i].category),
-                    getPriorityString(claimArray->claims[i].priority),
-                    submission_date_str);
-        }
-    }
-
-    fprintf(reportFile, "\nResolved Complaints:\n");
-    fprintf(reportFile, "________________________\n");
-    for (int i = 0; i < claimArray->count; i++) {
-        struct tm* lastStatusChangeTm = localtime(&claimArray->claims[i].last_status_change);
-        char last_status_change_str[20];
-        strftime(last_status_change_str, 20, "%Y-%m-%d %H:%M:%S", lastStatusChangeTm);
-        if (claimArray->claims[i].status == RESOLVED && lastStatusChangeTm->tm_mday == currentDay && lastStatusChangeTm->tm_mon == currentMonth - 1 && lastStatusChangeTm->tm_year == currentYear - 1900) {
-            fprintf(reportFile, "ID: %d, Username: %s, Category: %s, Priority: %s, Last Status Change: %s\n",
-                    claimArray->claims[i].id,
-                    claimArray->claims[i].username,
-                    getCategoryString(claimArray->claims[i].category),
-                    getPriorityString(claimArray->claims[i].priority),
-                    last_status_change_str);
-        }
-    }
-
-    fclose(reportFile);
-    printf("Daily report generated successfully.\n");
-}
-
